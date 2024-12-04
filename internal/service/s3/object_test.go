@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -2016,6 +2017,73 @@ func TestAccS3Object_basicUpgrade(t *testing.T) {
 	})
 }
 
+func TestAccS3Object_tableBucket(t *testing.T) {
+	ctx := acctest.Context(t)
+	var obj s3.GetObjectOutput
+	resourceName := "aws_s3_object.object"
+	bucketName := sdkacctest.RandomWithPrefix(acctest.ResourcePrefix)
+	namespace := strings.ReplaceAll(sdkacctest.RandomWithPrefix(acctest.ResourcePrefix), "-", "_")
+	rName := strings.ReplaceAll(sdkacctest.RandomWithPrefix(acctest.ResourcePrefix), "-", "_")
+
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.S3ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckObjectDestroy(ctx),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccObjectConfig_tableBucket(bucketName, namespace, rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckObjectExists(ctx, resourceName, &obj),
+					testAccCheckObjectBody(&obj, ""),
+					resource.TestCheckNoResourceAttr(resourceName, "acl"),
+					acctest.MatchResourceAttrGlobalARNNoAccount(resourceName, names.AttrARN, "s3", regexache.MustCompile(fmt.Sprintf(`%s--[-a-z0-9]+--x-s3/%s$`, rName, "test-key"))),
+					resource.TestMatchResourceAttr(resourceName, names.AttrBucket, regexache.MustCompile(fmt.Sprintf(`^%s--[-a-z0-9]+--x-s3$`, rName))),
+					resource.TestCheckResourceAttr(resourceName, "bucket_key_enabled", acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, "cache_control", ""),
+					resource.TestCheckNoResourceAttr(resourceName, "checksum_algorithm"),
+					resource.TestCheckResourceAttr(resourceName, "checksum_crc32", ""),
+					resource.TestCheckResourceAttr(resourceName, "checksum_crc32c", ""),
+					resource.TestCheckResourceAttr(resourceName, "checksum_sha1", ""),
+					resource.TestCheckResourceAttr(resourceName, "checksum_sha256", ""),
+					resource.TestCheckNoResourceAttr(resourceName, names.AttrContent),
+					resource.TestCheckNoResourceAttr(resourceName, "content_base64"),
+					resource.TestCheckResourceAttr(resourceName, "content_disposition", ""),
+					resource.TestCheckResourceAttr(resourceName, "content_encoding", ""),
+					resource.TestCheckResourceAttr(resourceName, "content_language", ""),
+					resource.TestCheckResourceAttr(resourceName, names.AttrContentType, "application/octet-stream"),
+					resource.TestCheckResourceAttrSet(resourceName, "etag"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrForceDestroy, acctest.CtFalse),
+					resource.TestCheckResourceAttr(resourceName, names.AttrKey, "test-key"),
+					resource.TestCheckNoResourceAttr(resourceName, names.AttrKMSKeyID),
+					resource.TestCheckResourceAttr(resourceName, "metadata.%", "0"),
+					resource.TestCheckResourceAttr(resourceName, "object_lock_legal_hold_status", ""),
+					resource.TestCheckResourceAttr(resourceName, "object_lock_mode", ""),
+					resource.TestCheckResourceAttr(resourceName, "object_lock_retain_until_date", ""),
+					resource.TestCheckResourceAttr(resourceName, "override_provider.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "override_provider.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "override_provider.0.default_tags.#", "1"),
+					resource.TestCheckResourceAttr(resourceName, "override_provider.0.default_tags.0.tags.%", "0"),
+					resource.TestCheckResourceAttr(resourceName, "server_side_encryption", "AES256"),
+					resource.TestCheckNoResourceAttr(resourceName, names.AttrSource),
+					resource.TestCheckNoResourceAttr(resourceName, "source_hash"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrStorageClass, "EXPRESS_ONEZONE"),
+					resource.TestCheckResourceAttr(resourceName, acctest.CtTagsPercent, "0"),
+					resource.TestCheckResourceAttr(resourceName, "version_id", ""),
+					resource.TestCheckResourceAttr(resourceName, "website_redirect", ""),
+				),
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{names.AttrForceDestroy, "override_provider"},
+				ImportStateIdFunc:       testAccObjectImportStateIdFunc(resourceName),
+			},
+		},
+	})
+}
+
 func testAccCheckObjectVersionIDDiffers(first, second *s3.GetObjectOutput) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		if aws.ToString(first.VersionId) == aws.ToString(second.VersionId) {
@@ -3192,4 +3260,39 @@ resource "aws_s3_object" "object" {
   kms_key_id = data.aws_kms_key.test.arn
 }
 `, rName, content)
+}
+
+func testAccTableBucketConfig_base(bucket, namespace, table string) string {
+	return fmt.Sprintf(`
+resource "aws_s3tables_table_bucket" "test" {
+  name = %[1]q
+}
+
+resource "aws_s3tables_namespace" "test" {
+  namespace        = %[2]q
+  table_bucket_arn = aws_s3tables_table_bucket.test.arn
+}
+
+resource "aws_s3tables_table" "test" {
+  name             = %[3]q
+  namespace        = aws_s3tables_namespace.test.namespace
+  table_bucket_arn = aws_s3tables_namespace.test.table_bucket_arn
+  format           = "ICEBERG"
+}
+`, bucket, namespace, table)
+}
+
+func testAccObjectConfig_tableBucket(bucket, namespace, rName string) string {
+	return acctest.ConfigCompose(testAccTableBucketConfig_base(bucket, namespace, rName), `
+resource "aws_s3_object" "object" {
+  bucket = trimprefix(aws_s3tables_table.test.warehouse_location, "s3://")
+  key    = "test-key"
+
+//   override_provider {
+//     default_tags {
+//       tags = {}
+//     }
+//   }
+}
+`)
 }
